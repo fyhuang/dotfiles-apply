@@ -180,8 +180,10 @@ def make_links_cli():
     # pick files
     toapply = []
     for operation in planned_links:
-        print("Filename of symlink: {}".format(operation.dest_path))
+        if operation.action == "noop":
+            continue
 
+        print("Filename of symlink: {}".format(operation.dest_path))
         relative_path = operation.source_path.relative_to(paths.homelinks())
 
         if operation.action == "create":
