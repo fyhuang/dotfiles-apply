@@ -56,39 +56,38 @@ def test_get_available_customs():
 def test_plan_execute():
     with tempfile.TemporaryDirectory() as td:
         config = MachineConfig(top=Path("testdata/basic"), dest=td)
-        link_ops = LinkOperations(config)
 
         # Prepare dest
         (config.dest / ".bashrc").touch()
         os.symlink(src=config.homelinks().absolute() / ".zshrc", dst=config.dest / ".zshrc")
 
-        planned_links = set(link_ops.plan_links())
+        planned_links = set(plan_links(config))
         pprint.pp(planned_links)
 
         # Ordinary homelink
         assert Operation(
-            action="create",
+            action=Action.CREATE,
             source_path=config.homelinks().absolute() / ".gitconfig",
             dest_path=config.dest / ".gitconfig",
         ) in planned_links
 
         # Ordinary homelink, but target already exists
         assert Operation(
-            action="replace",
+            action=Action.REPLACE,
             source_path=config.homelinks().absolute() / ".bashrc",
             dest_path=config.dest / ".bashrc",
         ) in planned_links
 
         # Link already exists
         assert Operation(
-            action="noop",
+            action=Action.NOOP,
             source_path=None,
             dest_path=config.dest / ".zshrc",
         ) in planned_links
 
         # Execute planned links
         for operation in planned_links:
-            link_ops.execute_link(operation)
+            execute_operation(operation)
 
         # Check result
         assert (config.dest / ".gitconfig").is_symlink()
@@ -97,6 +96,40 @@ def test_plan_execute():
 
         assert (config.dest / ".ssh/config").is_symlink() # _link_individual
         assert (config.dest / "Library/Application Support/Code/User/settings.json").is_symlink() # custom path_overrides
+
+
+def test_apply_plan():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        source = td / "src"
+        source.mkdir()
+        (source / "a.txt").touch()
+        (source / "b.txt").touch()
+
+        plan = [
+            Operation(Action.CREATE, source / "a.txt", td / "dest" / "a.txt"),
+            Operation(Action.CREATE, source / "b.txt", td / "dest" / "b.txt"),
+        ]
+        apply_plan(plan)
+
+        assert (td / "dest" / "a.txt").is_symlink()
+        assert (td / "dest" / "b.txt").is_symlink()
+
+        # Replace one, noop the other
+        plan2 = [
+            Operation(Action.REPLACE, source / "a.txt", td / "dest" / "a.txt"),
+            Operation(Action.NOOP, None, td / "dest" / "b.txt"),
+        ]
+        apply_plan(plan2)
+        assert (td / "dest" / "a.txt").is_symlink()
+        assert (td / "dest" / "b.txt").is_symlink()
+
+        # Wipe a directory
+        wipe_target = td / "dest" / "subdir"
+        wipe_target.mkdir()
+        (wipe_target / "junk.txt").touch()
+        apply_plan([Operation(Action.WIPE_DIR, None, wipe_target)])
+        assert not wipe_target.exists()
 
 
 ################################
@@ -132,7 +165,7 @@ def test_build_include_d_base_only():
     with tempfile.TemporaryDirectory() as td:
         repo = _make_tags_repo(Path(td))
         config = MachineConfig(top=repo, customs_name="machine-base")
-        build_include_d(config)
+        apply_plan(plan_include_d(config))
 
         include_d = repo / "include.d"
         assert (include_d / "common.sh").is_symlink()
@@ -143,7 +176,7 @@ def test_build_include_d_with_tag():
     with tempfile.TemporaryDirectory() as td:
         repo = _make_tags_repo(Path(td))
         config = MachineConfig(top=repo, customs_name="machine-tagA")
-        build_include_d(config)
+        apply_plan(plan_include_d(config))
 
         include_d = repo / "include.d"
         assert (include_d / "common.sh").is_symlink()
@@ -155,7 +188,7 @@ def test_build_include_d_multiple_tags():
     with tempfile.TemporaryDirectory() as td:
         repo = _make_tags_repo(Path(td))
         config = MachineConfig(top=repo, customs_name="machine-tagAB")
-        build_include_d(config)
+        apply_plan(plan_include_d(config))
 
         include_d = repo / "include.d"
         assert (include_d / "common.sh").is_symlink()
@@ -169,7 +202,7 @@ def test_build_include_d_collision():
         config = MachineConfig(top=repo, customs_name="machine-collision")
 
         with pytest.raises(Exception, match="Conflict.*common.sh"):
-            build_include_d(config)
+            apply_plan(plan_include_d(config))
 
 
 ################################
@@ -200,7 +233,7 @@ def test_ensure_customs_symlink_create():
     with tempfile.TemporaryDirectory() as td:
         repo = _make_tags_repo(Path(td))
         config = MachineConfig(top=repo, customs_name="machine-tagA")
-        ensure_customs_symlink(config)
+        apply_plan(plan_customs_symlink(config))
 
         customs_link = repo / "customs"
         assert customs_link.is_symlink()
@@ -218,7 +251,7 @@ def test_ensure_customs_symlink_update():
 
         # Update to machine-tagA
         config = MachineConfig(top=repo, customs_name="machine-tagA")
-        ensure_customs_symlink(config)
+        apply_plan(plan_customs_symlink(config))
 
         assert customs_link.readlink() == Path("all_customs/machine-tagA")
 
