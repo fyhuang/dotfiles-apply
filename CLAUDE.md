@@ -4,6 +4,7 @@
 
 # Commands
 
+Typecheck: `uvx ty check`
 Test: `uv run pytest`
 
 # Testing
