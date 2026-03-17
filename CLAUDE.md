@@ -5,3 +5,7 @@
 # Commands
 
 Test: `uv run pytest`
+
+# Testing
+
+Sample dotfiles repositories for testing can be found in `testdata/`.
