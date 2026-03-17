@@ -1,0 +1,2 @@
+# tagA-specific rc file (linked when tagA active)
+export TAGA=1

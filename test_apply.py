@@ -1,14 +1,17 @@
 import pprint
+import shutil
 import tempfile
 from pathlib import Path
+
+import pytest
 
 from apply import *
 
 
 def test_path_overrides():
     with tempfile.TemporaryDirectory() as td:
-        paths = Paths(top=Path("testdata/basic"), dest=td)
-        po = paths.path_overrides()
+        config = MachineConfig(top=Path("testdata/basic"), dest=td)
+        po = config.path_overrides()
 
         # Overridden in customs
         assert po["vscode/settings.json"] == "Library/Application Support/Code/User/settings.json"
@@ -17,47 +20,47 @@ def test_path_overrides():
 
 def test_get_dotfile_entries():
     with tempfile.TemporaryDirectory() as td:
-        paths = Paths(top=Path("testdata/basic"), dest=td)
-        entries = set(get_dotfile_entries(paths))
+        config = MachineConfig(top=Path("testdata/basic"), dest=td)
+        entries = set(get_dotfile_entries_from(config, config.homelinks()))
         pprint.pp(entries)
 
         # Ordinary homelink
         assert DotfileEntry(
-            source_path=paths.homelinks() / ".gitconfig",
-            target_path=paths.dest / ".gitconfig",
+            source_path=config.homelinks() / ".gitconfig",
+            target_path=config.dest / ".gitconfig",
             relative_path=Path(".gitconfig"),
         ) in entries
 
         # _link_individual
         assert DotfileEntry(
-            source_path=paths.homelinks() / ".ssh" / "config",
-            target_path=paths.dest / ".ssh" / "config",
+            source_path=config.homelinks() / ".ssh" / "config",
+            target_path=config.dest / ".ssh" / "config",
             relative_path=Path(".ssh/config"),
         ) in entries
 
         # Overridden in custom paths file
         assert DotfileEntry(
-            source_path=paths.homelinks() / "vscode/settings.json",
-            target_path=paths.dest / "Library/Application Support/Code/User/settings.json",
+            source_path=config.homelinks() / "vscode/settings.json",
+            target_path=config.dest / "Library/Application Support/Code/User/settings.json",
             relative_path=Path("vscode/settings.json"),
         ) in entries
 
 
 def test_get_available_customs():
     with tempfile.TemporaryDirectory() as td:
-        paths = Paths(top=Path("testdata/basic"), dest=td)
-        customs = set(get_available_customs(paths))
+        config = MachineConfig(top=Path("testdata/basic"), dest=td)
+        customs = set(get_available_customs(config))
         assert customs == {"custom1", "custom2"}
 
 
 def test_plan_execute():
     with tempfile.TemporaryDirectory() as td:
-        paths = Paths(top=Path("testdata/basic"), dest=td)
-        link_ops = LinkOperations(paths)
+        config = MachineConfig(top=Path("testdata/basic"), dest=td)
+        link_ops = LinkOperations(config)
 
         # Prepare dest
-        (paths.dest / ".bashrc").touch()
-        os.symlink(src=paths.homelinks().absolute() / ".zshrc", dst=paths.dest / ".zshrc")
+        (config.dest / ".bashrc").touch()
+        os.symlink(src=config.homelinks().absolute() / ".zshrc", dst=config.dest / ".zshrc")
 
         planned_links = set(link_ops.plan_links())
         pprint.pp(planned_links)
@@ -65,22 +68,22 @@ def test_plan_execute():
         # Ordinary homelink
         assert Operation(
             action="create",
-            source_path=paths.homelinks().absolute() / ".gitconfig",
-            dest_path=paths.dest / ".gitconfig",
+            source_path=config.homelinks().absolute() / ".gitconfig",
+            dest_path=config.dest / ".gitconfig",
         ) in planned_links
 
         # Ordinary homelink, but target already exists
         assert Operation(
             action="replace",
-            source_path=paths.homelinks().absolute() / ".bashrc",
-            dest_path=paths.dest / ".bashrc",
+            source_path=config.homelinks().absolute() / ".bashrc",
+            dest_path=config.dest / ".bashrc",
         ) in planned_links
 
         # Link already exists
         assert Operation(
             action="noop",
             source_path=None,
-            dest_path=paths.dest / ".zshrc",
+            dest_path=config.dest / ".zshrc",
         ) in planned_links
 
         # Execute planned links
@@ -88,9 +91,133 @@ def test_plan_execute():
             link_ops.execute_link(operation)
 
         # Check result
-        assert (paths.dest / ".gitconfig").is_symlink()
-        assert (paths.dest / ".bashrc").is_symlink()
-        assert (paths.dest / ".zshrc").is_symlink()
+        assert (config.dest / ".gitconfig").is_symlink()
+        assert (config.dest / ".bashrc").is_symlink()
+        assert (config.dest / ".zshrc").is_symlink()
 
-        assert (paths.dest / ".ssh/config").is_symlink() # _link_individual
-        assert (paths.dest / "Library/Application Support/Code/User/settings.json").is_symlink() # custom path_overrides
+        assert (config.dest / ".ssh/config").is_symlink() # _link_individual
+        assert (config.dest / "Library/Application Support/Code/User/settings.json").is_symlink() # custom path_overrides
+
+
+################################
+# Tag tests (using testdata/tags/)
+################################
+
+TAGS_TESTDATA = Path("testdata/tags")
+
+
+def test_tags_empty():
+    config = MachineConfig(top=TAGS_TESTDATA, customs_name="machine-base")
+    assert config.tags() == []
+
+
+def test_tags():
+    config = MachineConfig(top=TAGS_TESTDATA, customs_name="machine-tagA")
+    assert config.tags() == ["tagA"]
+
+
+def test_tags_multiple():
+    config = MachineConfig(top=TAGS_TESTDATA, customs_name="machine-tagAB")
+    assert config.tags() == ["tagA", "tagB"]
+
+
+def _make_tags_repo(td: Path) -> Path:
+    """Copy testdata/tags into a temp dir and return the repo path."""
+    repo = td / "repo"
+    shutil.copytree(TAGS_TESTDATA, repo, symlinks=True)
+    return repo
+
+
+def test_build_include_d_base_only():
+    with tempfile.TemporaryDirectory() as td:
+        repo = _make_tags_repo(Path(td))
+        config = MachineConfig(top=repo, customs_name="machine-base")
+        build_include_d(config)
+
+        include_d = repo / "include.d"
+        assert (include_d / "common.sh").is_symlink()
+        assert not (include_d / "fn").exists()
+
+
+def test_build_include_d_with_tag():
+    with tempfile.TemporaryDirectory() as td:
+        repo = _make_tags_repo(Path(td))
+        config = MachineConfig(top=repo, customs_name="machine-tagA")
+        build_include_d(config)
+
+        include_d = repo / "include.d"
+        assert (include_d / "common.sh").is_symlink()
+        assert (include_d / "fn" / "tagA.sh").is_symlink()
+        assert not (include_d / "fn" / "tagB.sh").exists()
+
+
+def test_build_include_d_multiple_tags():
+    with tempfile.TemporaryDirectory() as td:
+        repo = _make_tags_repo(Path(td))
+        config = MachineConfig(top=repo, customs_name="machine-tagAB")
+        build_include_d(config)
+
+        include_d = repo / "include.d"
+        assert (include_d / "common.sh").is_symlink()
+        assert (include_d / "fn" / "tagA.sh").is_symlink()
+        assert (include_d / "fn" / "tagB.sh").is_symlink()
+
+
+def test_build_include_d_collision():
+    with tempfile.TemporaryDirectory() as td:
+        repo = _make_tags_repo(Path(td))
+        config = MachineConfig(top=repo, customs_name="machine-collision")
+
+        with pytest.raises(Exception, match="Conflict.*common.sh"):
+            build_include_d(config)
+
+
+################################
+# Tagged homelinks tests
+################################
+
+def test_get_all_dotfile_entries_base_only():
+    with tempfile.TemporaryDirectory() as td:
+        config = MachineConfig(top=TAGS_TESTDATA, dest=td, customs_name="machine-base")
+        entries = get_all_dotfile_entries(config)
+        relpaths = {e.relative_path for e in entries}
+        assert relpaths == {Path(".profile")}
+
+
+def test_get_all_dotfile_entries_with_tag():
+    with tempfile.TemporaryDirectory() as td:
+        config = MachineConfig(top=TAGS_TESTDATA, dest=td, customs_name="machine-tagA")
+        entries = get_all_dotfile_entries(config)
+        relpaths = {e.relative_path for e in entries}
+        assert relpaths == {Path(".profile"), Path(".tagrc")}
+
+
+################################
+# CLI helpers tests
+################################
+
+def test_ensure_customs_symlink_create():
+    with tempfile.TemporaryDirectory() as td:
+        repo = _make_tags_repo(Path(td))
+        config = MachineConfig(top=repo, customs_name="machine-tagA")
+        ensure_customs_symlink(config)
+
+        customs_link = repo / "customs"
+        assert customs_link.is_symlink()
+        assert customs_link.readlink() == Path("all_customs/machine-tagA")
+
+
+def test_ensure_customs_symlink_update():
+    with tempfile.TemporaryDirectory() as td:
+        repo = _make_tags_repo(Path(td))
+
+        # Create initial symlink to a different machine
+        customs_link = repo / "customs"
+        customs_link.symlink_to(Path("all_customs/machine-base"))
+        assert customs_link.readlink() == Path("all_customs/machine-base")
+
+        # Update to machine-tagA
+        config = MachineConfig(top=repo, customs_name="machine-tagA")
+        ensure_customs_symlink(config)
+
+        assert customs_link.readlink() == Path("all_customs/machine-tagA")

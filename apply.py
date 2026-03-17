@@ -8,11 +8,10 @@ if sys.version_info[0] < 3:
 import os
 import os.path
 import argparse
-import pprint
+import base64
+import shutil
 from pathlib import Path
 from collections import namedtuple
-
-from typing import Tuple, List
 
 
 ################################
@@ -29,8 +28,8 @@ Operation = namedtuple(
 )
 
 
-class Paths:
-    def __init__(self, top=None, dest=None):
+class MachineConfig:
+    def __init__(self, top=None, dest=None, customs_name: str | None = None):
         if top is None:
             #top = Path(os.path.realpath(__file__)).parent
             top = Path.cwd()
@@ -40,12 +39,33 @@ class Paths:
             dest = Path.home()
         self.dest = Path(dest)
 
-    def homelinks(self):
+        self.customs_name = customs_name
+
+    def homelinks(self) -> Path:
         return self.top / "homelinks"
+
+    def customs_dir(self) -> Path | None:
+        if self.customs_name is not None:
+            return self.top / "all_customs" / self.customs_name
+        # Fallback: customs/ symlink (backward compat)
+        customs_path = self.top / "customs"
+        if customs_path.exists():
+            return customs_path
+        return None
+
+    def tags(self) -> list[str]:
+        cd = self.customs_dir()
+        if cd is None:
+            return []
+        tags_file = cd / "tags"
+        if not tags_file.exists():
+            return []
+        return [line.strip() for line in open(tags_file) if line.strip()]
 
     def path_overrides(self) -> dict:
         base = read_path_overrides(self.top / "path_overrides")
-        custom = read_path_overrides(self.top / "customs" / "path_overrides")
+        cd = self.customs_dir()
+        custom = read_path_overrides(cd / "path_overrides") if cd else {}
         return base | custom
 
 
@@ -61,12 +81,10 @@ def read_path_overrides(filepath: Path) -> dict:
         return dict(line.strip().split(":", maxsplit=1) for line in f if ":" in line)
 
 
-def get_dotfile_entries(paths):
-    overrides = paths.path_overrides()
-
-    source_paths = []
-    relative_paths = []
-    target_paths = []
+def get_dotfile_entries_from(config: MachineConfig, source_dir: Path) -> list[DotfileEntry]:
+    """Walk a homelinks-style directory and return entries with resolved target paths."""
+    overrides = config.path_overrides()
+    entries: list[DotfileEntry] = []
 
     def search_recur(top: Path):
         for child in top.iterdir():
@@ -79,22 +97,75 @@ def get_dotfile_entries(paths):
                     search_recur(child)
                     continue
 
-            source_paths.append(child)
-            relpath = child.relative_to(paths.homelinks())
-            relative_paths.append(relpath)
+            relpath = child.relative_to(source_dir)
 
             # apply path overrides
             if str(relpath) in overrides:
-                target_paths.append(paths.dest / overrides[str(relpath)])
+                target = config.dest / overrides[str(relpath)]
             else:
-                target_paths.append(paths.dest / relpath)
+                target = config.dest / relpath
 
-    search_recur(paths.homelinks())
-    return [DotfileEntry(*t) for t in zip(source_paths, target_paths, relative_paths)]
+            entries.append(DotfileEntry(child, target, relpath))
+
+    search_recur(source_dir)
+    return entries
 
 
-def get_available_customs(paths):
-    return [p.name for p in paths.top.glob("all_customs/*")]
+def get_all_dotfile_entries(config: MachineConfig) -> list[DotfileEntry]:
+    """Collect from homelinks/ + homelinks-<tag>/ for each active tag."""
+    entries = get_dotfile_entries_from(config, config.homelinks())
+    for tag in config.tags():
+        tag_homelinks = config.top / f"homelinks-{tag}"
+        if tag_homelinks.is_dir():
+            entries += get_dotfile_entries_from(config, tag_homelinks)
+    return entries
+
+
+def get_available_customs(config: MachineConfig) -> list[str]:
+    return [p.name for p in config.top.glob("all_customs/*")]
+
+
+def collect_include_entries(config: MachineConfig) -> dict[Path, Path]:
+    """Collect include files: {relpath -> source_path}. Raises on conflicts."""
+    tags = config.tags()
+    entries: dict[Path, tuple[Path, str]] = {}
+    source_dirs = [config.top / "include"] + [config.top / f"include-{t}" for t in tags]
+    for source_dir in source_dirs:
+        if not source_dir.is_dir():
+            continue
+        for f in source_dir.rglob("*"):
+            if f.is_file():
+                relpath = f.relative_to(source_dir)
+                if relpath in entries:
+                    _, prev_dir = entries[relpath]
+                    raise Exception(
+                        f"Conflict: {relpath} provided by both "
+                        f"{prev_dir} and {source_dir.name}"
+                    )
+                entries[relpath] = (f, source_dir.name)
+    return {relpath: source for relpath, (source, _) in entries.items()}
+
+
+def build_include_d(config: MachineConfig, dry_run: bool = False) -> None:
+    """Rebuild include.d/ from include/ + include-<tag>/ for active tags."""
+    include_d = config.top / "include.d"
+    entries = collect_include_entries(config)
+
+    for relpath, source in sorted(entries.items()):
+        print(f"  {source} -> include.d/{relpath}")
+
+    if dry_run:
+        return
+
+    # Wipe and recreate
+    if include_d.exists():
+        shutil.rmtree(include_d)
+
+    # Create symlinks
+    for relpath, source in entries.items():
+        dest = include_d / relpath
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.symlink_to(source.absolute())
 
 
 ################################
@@ -103,11 +174,11 @@ def get_available_customs(paths):
 
 
 class LinkOperations:
-    def __init__(self, paths):
-        self.paths = paths
+    def __init__(self, config: MachineConfig):
+        self.config = config
 
-    def plan_links(self) -> List[Operation]:
-        entries = get_dotfile_entries(self.paths)
+    def plan_links(self) -> list[Operation]:
+        entries = get_all_dotfile_entries(self.config)
         plan = []
         for entry in entries:
             abs_source_path = entry.source_path.absolute()
@@ -129,16 +200,12 @@ class LinkOperations:
             return
 
         if os.path.exists(operation.dest_path):
-            print("Removing {}".format(operation.dest_path))
             os.remove(operation.dest_path)
 
         # make parent directories if necessary
-        target_dir = operation.dest_path.parent
-        print("Creating directory {}".format(target_dir))
-        os.makedirs(target_dir, exist_ok=True)
+        os.makedirs(operation.dest_path.parent, exist_ok=True)
 
         # get the absolute path of source_path
-        print("Linking {} -> {}".format(operation.source_path, operation.dest_path))
         os.symlink(operation.source_path, operation.dest_path)
 
 
@@ -147,86 +214,75 @@ class LinkOperations:
 ################################
 
 
-def get_confirm(prompt, default_response="y"):
-    confirm = input(prompt).lower()
-    if confirm == "":
-        confirm = default_response
-    return confirm
-
-
-def print_current_status(target_path):
-    if os.path.islink(target_path):
-        print("{} currently points to {}".format(target_path, os.readlink(target_path)))
-    elif os.path.isfile(target_path):
-        print("{} is a regular file".format(target_path))
+def ensure_customs_symlink(config: MachineConfig) -> None:
+    """Create/update customs/ symlink to point to all_customs/<name>/."""
+    if config.customs_name is None:
+        return
+    customs_link = config.top / "customs"
+    target = Path("all_customs") / config.customs_name
+    if customs_link.is_symlink():
+        if customs_link.readlink() == target:
+            print(f"  customs/ -> {target} (ok)")
+            return
+        print(f"  customs/ -> {target} (updating)")
+        customs_link.unlink()
+    elif customs_link.exists():
+        raise Exception(f"customs/ exists and is not a symlink: {customs_link}")
     else:
-        print("{} is of unknown type".format(target_path))
+        print(f"  customs/ -> {target} (creating)")
+    customs_link.symlink_to(target)
 
 
-def print_help():
-    print(
-        "Don't forget to run `git submodule update --init --recursive` for vim plugins"
-    )
-    print("For Ansible:")
-    print("sudo add-apt-repository --update ppa:ansible/ansible")
-    print("sudo apt install ansible")
+def apply_links(config: MachineConfig, dry_run: bool = False) -> None:
+    """Apply all symlinks for the given machine config."""
+    link_ops = LinkOperations(config)
+    planned = link_ops.plan_links()
 
+    for op in planned:
+        if op.action == "noop":
+            print(f"  ok: {op.dest_path}")
+        elif op.action == "create":
+            print(f"  create: {op.source_path} -> {op.dest_path}")
+        elif op.action == "replace":
+            print(f"  replace: {op.source_path} -> {op.dest_path}")
 
-def make_links_cli():
-    paths = Paths()
-    link_ops = LinkOperations(paths)
-    planned_links = link_ops.plan_links()
+    if dry_run:
+        return
 
-    # pick files
-    toapply = []
-    for operation in planned_links:
-        if operation.action == "noop":
-            continue
-
-        print("Filename of symlink: {}".format(operation.dest_path))
-        relative_path = operation.source_path.relative_to(paths.homelinks())
-
-        if operation.action == "create":
-            confirm = get_confirm("Link {} (Y/n)? ".format(relative_path), "y")
-        elif operation.action == "replace":
-            print_current_status(operation.dest_path)
-            confirm = get_confirm(
-                "Remove and link {} (Y/n)? ".format(relative_path), "y"
-            )
-
-        if confirm == "y":
-            toapply.append(operation)
-
-    # make links
-    for operation in toapply:
-        link_ops.execute_link(operation)
-
-    print("Done")
-    print_help()
+    for op in planned:
+        link_ops.execute_link(op)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Dotfile Symlink Manager")
-    parser.add_argument("command", choices=["interactive", "printops"], default="interactive", nargs="?")
+    parser.add_argument("--top", default=None, help="Path to dotfiles repo (default: cwd)")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # apply
+    apply_parser = subparsers.add_parser("apply")
+    apply_parser.add_argument("--customs", required=True)
+    apply_parser.add_argument("--dry-run", action="store_true")
+
+    # build-includes
+    bi_parser = subparsers.add_parser("build-includes")
+    bi_parser.add_argument("--customs", required=True)
+    bi_parser.add_argument("--dry-run", action="store_true")
+
+
     args = parser.parse_args()
 
-    if args.command == "interactive":
-        selection = ""
-        while selection != "x":
-            print()
-            print("apply.py:")
-            print("  l: make symlinks to home directory")
-            print("  h: help")
+    if args.command is None:
+        parser.print_help()
 
-            selection = input("? ")
-            if selection == "l":
-                make_links_cli()
-            elif selection == "h":
-                print_help()
+    elif args.command == "apply":
+        config = MachineConfig(top=args.top, customs_name=args.customs)
+        ensure_customs_symlink(config)
+        build_include_d(config, dry_run=args.dry_run)
+        apply_links(config, dry_run=args.dry_run)
 
-    elif args.command == "printops":
-        ops = LinkOperations(Paths()).plan_links()
-        pprint.pp(ops)
+    elif args.command == "build-includes":
+        config = MachineConfig(top=args.top, customs_name=args.customs)
+        build_include_d(config, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
