@@ -221,3 +221,42 @@ def test_ensure_customs_symlink_update():
         ensure_customs_symlink(config)
 
         assert customs_link.readlink() == Path("all_customs/machine-tagA")
+
+
+################################
+# Bundle tests
+################################
+
+def test_generate_bundle():
+    with tempfile.TemporaryDirectory() as td:
+        config = MachineConfig(top=TAGS_TESTDATA, dest=td, customs_name="machine-tagA")
+        bundle = generate_bundle(config)
+
+        # Valid shell script
+        assert bundle.startswith("#!/bin/sh\n")
+        assert "set -e" in bundle
+
+        # Header
+        assert "# Customs: machine-tagA" in bundle
+        assert "# Tags: tagA" in bundle
+
+        # Homelinks: base + tagA
+        assert '"$HOME/.profile"' in bundle
+        assert '"$HOME/.tagrc"' in bundle
+
+        # Includes: base + tagA
+        assert '"$HOME/dotfiles/include.d/common.sh"' in bundle
+        assert '"$HOME/dotfiles/include.d/fn/tagA.sh"' in bundle
+
+        # tagB should NOT be present
+        assert "tagB" not in bundle
+
+        # Customs files
+        assert '"$HOME/dotfiles/customs/machinename"' in bundle
+        assert '"$HOME/dotfiles/customs/tags"' in bundle
+
+        # Base64 content decodes correctly
+        import base64
+        profile_content = Path("testdata/tags/homelinks/.profile").read_bytes()
+        profile_b64 = base64.b64encode(profile_content).decode()
+        assert profile_b64 in bundle
