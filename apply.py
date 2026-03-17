@@ -264,7 +264,7 @@ class LinkOperations:
 ################################
 
 
-def ensure_customs_symlink(config: MachineConfig) -> None:
+def ensure_customs_symlink(config: MachineConfig, dry_run: bool = False) -> None:
     """Create/update customs/ symlink to point to all_customs/<name>/."""
     if config.customs_name is None:
         return
@@ -275,11 +275,15 @@ def ensure_customs_symlink(config: MachineConfig) -> None:
             print(f"  customs/ -> {target} (ok)")
             return
         print(f"  customs/ -> {target} (updating)")
+        if dry_run:
+            return
         customs_link.unlink()
     elif customs_link.exists():
         raise Exception(f"customs/ exists and is not a symlink: {customs_link}")
     else:
         print(f"  customs/ -> {target} (creating)")
+    if dry_run:
+        return
     customs_link.symlink_to(target)
 
 
@@ -330,7 +334,7 @@ def main():
 
     elif args.command == "apply":
         config = MachineConfig(top=args.top, customs_name=args.customs)
-        ensure_customs_symlink(config)
+        ensure_customs_symlink(config, dry_run=args.dry_run)
         build_include_d(config, dry_run=args.dry_run)
         apply_links(config, dry_run=args.dry_run)
 
