@@ -207,8 +207,15 @@ def generate_bundle(config: MachineConfig) -> str:
     lines.append("# Homelinks")
     entries = get_all_dotfile_entries(config)
     for entry in entries:
-        rel_target = entry.target_path.relative_to(config.dest)
-        add_file(f"$HOME/{rel_target}", entry.source_path)
+        if entry.source_path.is_dir():
+            # Directory linked as a whole — bundle each file inside it
+            for f in sorted(entry.source_path.rglob("*")):
+                if f.is_file():
+                    rel_target = entry.target_path / f.relative_to(entry.source_path)
+                    add_file(f"$HOME/{rel_target.relative_to(config.dest)}", f)
+        else:
+            rel_target = entry.target_path.relative_to(config.dest)
+            add_file(f"$HOME/{rel_target}", entry.source_path)
 
     # Includes (merged)
     lines.append("# Includes")
