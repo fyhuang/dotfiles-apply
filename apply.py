@@ -249,7 +249,7 @@ def execute_operation(op: Operation) -> None:
             shutil.rmtree(op.dest_path)
         case Action.CREATE | Action.REPLACE:
             assert op.source_path is not None
-            if os.path.exists(op.dest_path):
+            if os.path.lexists(op.dest_path):
                 os.remove(op.dest_path)
             # make parent directories if necessary
             os.makedirs(op.dest_path.parent, exist_ok=True)
@@ -287,16 +287,17 @@ def plan_links(config: MachineConfig) -> list[Operation]:
     plan = []
     for entry in entries:
         abs_source_path = entry.source_path.absolute()
-        if not os.path.exists(entry.target_path):
-            plan.append(Operation(Action.CREATE, abs_source_path, entry.target_path))
-        elif entry.target_path.is_symlink():
+        if entry.target_path.is_symlink():
+            # Check symlinks first (handles both valid and broken symlinks)
             if entry.target_path.readlink() != abs_source_path:
                 plan.append(Operation(Action.REPLACE, abs_source_path, entry.target_path))
             else:
                 plan.append(Operation(Action.NOOP, None, entry.target_path))
-        else:
+        elif os.path.exists(entry.target_path):
             # exists and is not a symlink
             plan.append(Operation(Action.REPLACE, abs_source_path, entry.target_path))
+        else:
+            plan.append(Operation(Action.CREATE, abs_source_path, entry.target_path))
 
     return plan
 
