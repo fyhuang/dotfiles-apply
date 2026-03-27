@@ -269,6 +269,10 @@ def test_generate_bundle():
         assert bundle.startswith("#!/bin/sh\n")
         assert "set -e" in bundle
 
+        # -v flag support
+        assert 'if [ "$1" = "-v" ]' in bundle
+        assert 'echo "$1"' in bundle
+
         # Header
         assert "# Customs: machine-tagA" in bundle
         assert "# Tags: tagA" in bundle
