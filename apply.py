@@ -13,7 +13,7 @@ import shutil
 from enum import Enum
 from pathlib import Path
 from collections import namedtuple
-from typing import NamedTuple, assert_never
+from typing import NamedTuple, Optional
 
 
 ################################
@@ -38,12 +38,12 @@ class Action(Enum):
 
 class Operation(NamedTuple):
     action: Action
-    source_path: Path | None
+    source_path: Optional[Path]
     dest_path: Path
 
 
 class MachineConfig:
-    def __init__(self, top=None, dest=None, customs_name: str | None = None):
+    def __init__(self, top=None, dest=None, customs_name: Optional[str] = None):
         if top is None:
             #top = Path(os.path.realpath(__file__)).parent
             top = Path.cwd()
@@ -58,7 +58,7 @@ class MachineConfig:
     def homelinks(self) -> Path:
         return self.top / "homelinks"
 
-    def customs_dir(self) -> Path | None:
+    def customs_dir(self) -> Optional[Path]:
         if self.customs_name is not None:
             return self.top / "all_customs" / self.customs_name
         # Fallback: customs/ symlink (backward compat)
@@ -250,35 +250,33 @@ def generate_bundle(config: MachineConfig) -> str:
 
 def execute_operation(op: Operation) -> None:
     action = op.action
-    match action:
-        case Action.NOOP:
-            return
-        case Action.WIPE_DIR:
-            shutil.rmtree(op.dest_path)
-        case Action.CREATE | Action.REPLACE:
-            assert op.source_path is not None
-            if os.path.lexists(op.dest_path):
-                os.remove(op.dest_path)
-            # make parent directories if necessary
-            os.makedirs(op.dest_path.parent, exist_ok=True)
-            os.symlink(op.source_path, op.dest_path)
-        case _ as unreachable:
-            assert_never(unreachable)
+    if action == Action.NOOP:
+        return
+    elif action == Action.WIPE_DIR:
+        shutil.rmtree(op.dest_path)
+    elif action == Action.CREATE or action == Action.REPLACE:
+        assert op.source_path is not None
+        if os.path.lexists(op.dest_path):
+            os.remove(op.dest_path)
+        # make parent directories if necessary
+        os.makedirs(op.dest_path.parent, exist_ok=True)
+        os.symlink(op.source_path, op.dest_path)
+    else:
+        raise AssertionError(f"unreachable: {action}")
 
 
 def print_operation(op: Operation) -> None:
     action = op.action
-    match action:
-        case Action.NOOP:
-            print(f"  ok: {op.dest_path} -> {op.source_path}")
-        case Action.CREATE:
-            print(f"  create: {op.dest_path} -> {op.source_path}")
-        case Action.REPLACE:
-            print(f"  replace: {op.dest_path} -> {op.source_path}")
-        case Action.WIPE_DIR:
-            print(f"  wipe: {op.dest_path}")
-        case _ as unreachable:
-            assert_never(unreachable)
+    if action == Action.NOOP:
+        print(f"  ok: {op.dest_path} -> {op.source_path}")
+    elif action == Action.CREATE:
+        print(f"  create: {op.dest_path} -> {op.source_path}")
+    elif action == Action.REPLACE:
+        print(f"  replace: {op.dest_path} -> {op.source_path}")
+    elif action == Action.WIPE_DIR:
+        print(f"  wipe: {op.dest_path}")
+    else:
+        raise AssertionError(f"unreachable: {action}")
 
 
 def apply_plan(plan: list[Operation], dry_run: bool = False) -> None:
